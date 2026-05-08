@@ -12,6 +12,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AuthModal } from './components/AuthModal';
 import { useWorkspace } from './hooks/useWorkspace';
 import { useWorkspaceItems } from './hooks/useWorkspaceItems';
+import { useClientId } from './hooks/useClientId';
 import { LiveIndicator } from './components/LiveIndicator';
 import { RealtimeDebugPanel } from './components/RealtimeDebugPanel';
 import { projectId } from '../../utils/supabase/info';
@@ -27,7 +28,8 @@ const TIMEFRAMES = [
 function RoadmapApp() {
   const { user, signOut } = useAuth();
   const { workspace, loading: workspaceLoading } = useWorkspace();
-  const { data, loading: itemsLoading, saveItem, deleteItem, saveAllItems, setData, isLive, connectionStatus, debugInfo } = useWorkspaceItems(workspace?.id || null);
+  const clientId = useClientId();
+  const { data, loading: itemsLoading, saveItem, deleteItem, saveAllItems, setData, isLive, connectionStatus, debugInfo, markWorkspaceInitialized, isWorkspaceInitialized } = useWorkspaceItems(workspace?.id || null, clientId);
 
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [viewMode, setViewMode] = useState<'multilayer' | 'timeline' | 'structured'>('multilayer');
@@ -65,12 +67,17 @@ function RoadmapApp() {
     }
   }, [workspace]);
 
-  // Initialize workspace with default data if empty
+  // Initialize workspace with default data ONLY ONCE
   useEffect(() => {
-    if (!workspace || itemsLoading) return;
+    // Skip if already initialized, still loading, or no workspace
+    if (!workspace || itemsLoading || isWorkspaceInitialized()) {
+      return;
+    }
 
-    // If workspace is empty, add default sample data
+    // Only initialize if workspace is completely empty
     if (themes.length === 0 && capabilities.length === 0 && actions.length === 0) {
+      console.log('🎨 Initializing workspace with sample data (ONCE)');
+
       const defaultData = {
         themes: [
           {
@@ -145,35 +152,53 @@ function RoadmapApp() {
         },
       };
 
+      // Mark as initialized BEFORE saving to prevent loops
+      markWorkspaceInitialized();
+
+      // Set local state and save to database
       setData(defaultData);
       saveAllItems(defaultData);
+    } else if (themes.length > 0 || capabilities.length > 0 || actions.length > 0) {
+      // Workspace has data, mark as initialized
+      markWorkspaceInitialized();
     }
-  }, [workspace, itemsLoading, themes.length, capabilities.length, actions.length]);
+  }, [workspace, itemsLoading, themes.length, capabilities.length, actions.length, isWorkspaceInitialized, markWorkspaceInitialized, setData, saveAllItems]);
 
   // Update functions that save to Supabase
+  // These are called by USER ACTIONS only
   const setThemes = (newThemes: ThemeCardData[]) => {
-    setData({ ...data, themes: newThemes });
-    saveAllItems({ ...data, themes: newThemes });
+    console.log('👤 [User Action] Updating themes');
+    const newData = { ...data, themes: newThemes };
+    setData(newData);
+    saveAllItems(newData);
   };
 
   const setCapabilities = (newCapabilities: CapabilityCardData[]) => {
-    setData({ ...data, capabilities: newCapabilities });
-    saveAllItems({ ...data, capabilities: newCapabilities });
+    console.log('👤 [User Action] Updating capabilities');
+    const newData = { ...data, capabilities: newCapabilities };
+    setData(newData);
+    saveAllItems(newData);
   };
 
   const setActions = (newActions: ActionCardData[]) => {
-    setData({ ...data, actions: newActions });
-    saveAllItems({ ...data, actions: newActions });
+    console.log('👤 [User Action] Updating actions');
+    const newData = { ...data, actions: newActions };
+    setData(newData);
+    saveAllItems(newData);
   };
 
   const setDependencies = (newDependencies: DependencyConnection[]) => {
-    setData({ ...data, dependencies: newDependencies });
-    saveAllItems({ ...data, dependencies: newDependencies });
+    console.log('👤 [User Action] Updating dependencies');
+    const newData = { ...data, dependencies: newDependencies };
+    setData(newData);
+    saveAllItems(newData);
   };
 
   const setTimeframeDefinitions = (newTimeframeDefinitions: Record<string, string>) => {
-    setData({ ...data, timeframeDefinitions: newTimeframeDefinitions });
-    saveAllItems({ ...data, timeframeDefinitions: newTimeframeDefinitions });
+    console.log('👤 [User Action] Updating timeframe definitions');
+    const newData = { ...data, timeframeDefinitions: newTimeframeDefinitions };
+    setData(newData);
+    saveAllItems(newData);
   };
 
   const orderActionsByDependencies = (

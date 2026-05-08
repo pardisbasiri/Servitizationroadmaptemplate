@@ -25,7 +25,7 @@ interface WorkspaceData {
   timeframeDefinitions: Record<string, string>;
 }
 
-export function useWorkspaceItems(workspaceId: string | null) {
+export function useWorkspaceItems(workspaceId: string | null, clientId: string | null) {
   const { user } = useAuth();
   const [data, setData] = useState<WorkspaceData>({
     themes: [],
@@ -50,16 +50,21 @@ export function useWorkspaceItems(workspaceId: string | null) {
     realtimeEnabled: true,
   });
   const channelRef = useRef<any>(null);
+  const isSavingRef = useRef(false); // Prevent feedback loops during saves
+  const hasInitializedRef = useRef(false); // Track if workspace was initialized
 
   // Load all items from workspace
-  const loadItems = useCallback(async () => {
+  const loadItems = useCallback(async (skipLoading = false) => {
     if (!workspaceId || !user) {
       setLoading(false);
       return;
     }
 
     try {
-      console.log('📥 Loading items for workspace:', workspaceId);
+      if (!skipLoading) {
+        console.log('📥 Loading items for workspace:', workspaceId);
+      }
+
       const { data: items, error } = await supabase
         .from('workspace_items')
         .select('*')
@@ -99,12 +104,14 @@ export function useWorkspaceItems(workspaceId: string | null) {
         }
       });
 
-      console.log('✅ Loaded items:', {
-        themes: themes.length,
-        capabilities: capabilities.length,
-        actions: actions.length,
-        dependencies: dependencies.length,
-      });
+      if (!skipLoading) {
+        console.log('✅ Loaded items:', {
+          themes: themes.length,
+          capabilities: capabilities.length,
+          actions: actions.length,
+          dependencies: dependencies.length,
+        });
+      }
 
       setData({ themes, capabilities, actions, dependencies, timeframeDefinitions });
       setLoading(false);
@@ -121,10 +128,10 @@ export function useWorkspaceItems(workspaceId: string | null) {
 
   // Set up realtime subscription
   useEffect(() => {
-    console.log('🔄 Realtime effect triggered', { workspaceId, userId: user?.id });
+    console.log('🔄 Realtime effect triggered', { workspaceId, userId: user?.id, clientId });
 
-    if (!workspaceId || !user) {
-      console.log('⚠️ Realtime: No workspace or user', { workspaceId, userId: user?.id });
+    if (!workspaceId || !user || !clientId) {
+      console.log('⚠️ Realtime: No workspace, user, or clientId', { workspaceId, userId: user?.id, clientId });
       setIsLive(false);
       setConnectionStatus('no_workspace_or_user');
       setDebugInfo(prev => ({
@@ -139,7 +146,7 @@ export function useWorkspaceItems(workspaceId: string | null) {
     console.log('🔌 Setting up realtime subscription', {
       workspaceId,
       userId: user.id,
-      userEmail: user.email,
+      clientId,
     });
 
     setConnectionStatus('connecting');
@@ -192,10 +199,17 @@ export function useWorkspaceItems(workspaceId: string | null) {
             workspace_id: payload.new?.workspace_id || payload.old?.workspace_id,
             author_id: payload.new?.author_id || payload.old?.author_id,
             current_user: user.id,
+            current_client: clientId,
             timestamp: new Date().toISOString(),
           });
 
           setDebugInfo(prev => ({ ...prev, lastEventTime: Date.now() }));
+
+          // CRITICAL: Ignore events if we're currently saving (feedback loop prevention)
+          if (isSavingRef.current) {
+            console.log('⏭️ Skipping - currently saving (feedback loop prevention)');
+            return;
+          }
 
           // Check if this was from the current user
           const isFromCurrentUser =
@@ -203,12 +217,12 @@ export function useWorkspaceItems(workspaceId: string | null) {
             payload.old?.author_id === user.id;
 
           if (isFromCurrentUser) {
-            console.log('⏭️ Skipping - change from current user');
+            console.log('⏭️ Skipping - change from current user (client may have saved this)');
             return;
           }
 
           console.log('🔄 Reloading items due to remote change from another user');
-          loadItems();
+          loadItems(true); // Skip loading state to prevent UI flicker
         }
       );
 
@@ -238,6 +252,7 @@ export function useWorkspaceItems(workspaceId: string | null) {
             channel: channelName,
             workspaceId,
             userId: user.id,
+            clientId,
             channelState: channel.state,
           });
         } else if (status === 'CHANNEL_ERROR') {
@@ -297,7 +312,7 @@ export function useWorkspaceItems(workspaceId: string | null) {
         isSubscribedToWorkspaceItems: false,
       }));
     };
-  }, [workspaceId, user, loadItems]);
+  }, [workspaceId, user, loadItems, clientId]);
 
   // Save item to database
   const saveItem = async (type: string, itemData: any, itemId?: string) => {
@@ -386,15 +401,19 @@ export function useWorkspaceItems(workspaceId: string | null) {
 
   // Batch save all items (for bulk operations like reordering)
   const saveAllItems = async (newData: Partial<WorkspaceData>) => {
-    if (!workspaceId || !user) return;
+    if (!workspaceId || !user || !clientId) return;
 
     try {
-      console.log('💾 Saving all items to workspace:', workspaceId, {
+      console.log('💾 [User Action] Saving all items to workspace:', workspaceId, {
         themes: newData.themes?.length,
         capabilities: newData.capabilities?.length,
         actions: newData.actions?.length,
         dependencies: newData.dependencies?.length,
+        clientId,
       });
+
+      // Set flag to prevent feedback loop
+      isSavingRef.current = true;
 
       // Delete all existing items
       await supabase
@@ -469,15 +488,36 @@ export function useWorkspaceItems(workspaceId: string | null) {
           .insert(itemsToInsert);
 
         if (error) {
-          console.error('Error saving all items:', error);
+          console.error('❌ Error saving all items:', error);
         } else {
-          console.log('✅ Saved', itemsToInsert.length, 'items to workspace');
+          console.log('✅ [User Action] Saved', itemsToInsert.length, 'items to workspace');
         }
       }
+
+      // Reset flag after a delay to allow realtime event to propagate
+      setTimeout(() => {
+        isSavingRef.current = false;
+        console.log('🔓 Save lock released');
+      }, 2000); // 2 second delay to ignore immediate realtime echo
+
     } catch (error) {
-      console.error('Error in saveAllItems:', error);
+      console.error('❌ Error in saveAllItems:', error);
+      isSavingRef.current = false;
     }
   };
+
+  // Mark workspace as initialized
+  const markWorkspaceInitialized = useCallback(() => {
+    if (workspaceId && !hasInitializedRef.current) {
+      hasInitializedRef.current = true;
+      console.log('✅ Workspace marked as initialized:', workspaceId);
+    }
+  }, [workspaceId]);
+
+  // Check if workspace has been initialized
+  const isWorkspaceInitialized = useCallback(() => {
+    return hasInitializedRef.current;
+  }, []);
 
   return {
     data,
@@ -489,5 +529,7 @@ export function useWorkspaceItems(workspaceId: string | null) {
     isLive,
     connectionStatus,
     debugInfo,
+    markWorkspaceInitialized,
+    isWorkspaceInitialized,
   };
 }
