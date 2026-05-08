@@ -40,6 +40,17 @@ function RoadmapApp() {
   const dependencies = data.dependencies;
   const timeframeDefinitions = data.timeframeDefinitions;
 
+  // Log workspace info for debugging
+  useEffect(() => {
+    if (workspace) {
+      console.log('🏢 Active workspace:', {
+        id: workspace.id,
+        name: workspace.name,
+        owner_id: workspace.owner_id,
+      });
+    }
+  }, [workspace]);
+
   // Initialize workspace with default data if empty
   useEffect(() => {
     if (!workspace || itemsLoading) return;

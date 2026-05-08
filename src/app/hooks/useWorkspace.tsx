@@ -29,11 +29,14 @@ export function useWorkspace() {
     if (!user) return;
 
     try {
-      // Try to get existing workspace
-      const { data: workspaces, error: fetchError } = await supabase
+      // Use a shared workspace name for collaboration testing
+      const SHARED_WORKSPACE_NAME = 'Shared Test Roadmap';
+
+      // Try to get the shared workspace
+      const { data: sharedWorkspaces, error: fetchError } = await supabase
         .from('workspaces')
         .select('*')
-        .eq('owner_id', user.id)
+        .eq('name', SHARED_WORKSPACE_NAME)
         .limit(1);
 
       if (fetchError) {
@@ -42,29 +45,65 @@ export function useWorkspace() {
         return;
       }
 
-      if (workspaces && workspaces.length > 0) {
-        setWorkspace(workspaces[0]);
+      let targetWorkspace: Workspace | null = null;
+
+      if (sharedWorkspaces && sharedWorkspaces.length > 0) {
+        targetWorkspace = sharedWorkspaces[0];
+        console.log('📁 Using existing shared workspace:', targetWorkspace.id);
+      } else {
+        // Create shared workspace if none exists
+        const { data: newWorkspace, error: createError } = await supabase
+          .from('workspaces')
+          .insert({
+            name: SHARED_WORKSPACE_NAME,
+            owner_id: user.id,
+          })
+          .select()
+          .single();
+
+        if (createError) {
+          console.error('Error creating workspace:', createError);
+          setLoading(false);
+          return;
+        }
+
+        targetWorkspace = newWorkspace;
+        console.log('✨ Created new shared workspace:', targetWorkspace.id);
+      }
+
+      if (!targetWorkspace) {
         setLoading(false);
         return;
       }
 
-      // Create default workspace if none exists
-      const { data: newWorkspace, error: createError } = await supabase
-        .from('workspaces')
-        .insert({
-          name: 'My Roadmap',
-          owner_id: user.id,
-        })
-        .select()
+      // Check if user is already a member
+      const { data: existingMembership } = await supabase
+        .from('workspace_members')
+        .select('*')
+        .eq('workspace_id', targetWorkspace.id)
+        .eq('user_id', user.id)
         .single();
 
-      if (createError) {
-        console.error('Error creating workspace:', createError);
-        setLoading(false);
-        return;
+      if (!existingMembership) {
+        // Add current user to workspace_members
+        const { error: memberError } = await supabase
+          .from('workspace_members')
+          .insert({
+            workspace_id: targetWorkspace.id,
+            user_id: user.id,
+            role: 'editor',
+          });
+
+        if (memberError) {
+          console.error('Error adding user to workspace:', memberError);
+        } else {
+          console.log('👤 Added user to workspace members:', user.email);
+        }
+      } else {
+        console.log('👤 User already member of workspace:', user.email);
       }
 
-      setWorkspace(newWorkspace);
+      setWorkspace(targetWorkspace);
       setLoading(false);
     } catch (error) {
       console.error('Error in loadOrCreateWorkspace:', error);

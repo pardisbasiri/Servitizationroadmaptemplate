@@ -50,6 +50,7 @@ export function useWorkspaceItems(workspaceId: string | null) {
     }
 
     try {
+      console.log('📥 Loading items for workspace:', workspaceId);
       const { data: items, error } = await supabase
         .from('workspace_items')
         .select('*')
@@ -88,6 +89,13 @@ export function useWorkspaceItems(workspaceId: string | null) {
         }
       });
 
+      console.log('✅ Loaded items:', {
+        themes: themes.length,
+        capabilities: capabilities.length,
+        actions: actions.length,
+        dependencies: dependencies.length,
+      });
+
       setData({ themes, capabilities, actions, dependencies, timeframeDefinitions });
       setLoading(false);
     } catch (error) {
@@ -103,9 +111,12 @@ export function useWorkspaceItems(workspaceId: string | null) {
   // Set up realtime subscription
   useEffect(() => {
     if (!workspaceId || !user) {
+      console.log('⚠️ Realtime: No workspace or user');
       setIsLive(false);
       return;
     }
+
+    console.log('🔌 Setting up realtime subscription for workspace:', workspaceId);
 
     const channel = supabase
       .channel(`workspace:${workspaceId}`)
@@ -118,25 +129,38 @@ export function useWorkspaceItems(workspaceId: string | null) {
           filter: `workspace_id=eq.${workspaceId}`,
         },
         (payload) => {
+          console.log('📡 Realtime event received:', {
+            event: payload.eventType,
+            table: payload.table,
+            new: payload.new,
+            old: payload.old,
+          });
+
           // Ignore changes made by current user to prevent duplicates
           if (isLocalUpdate.current) {
+            console.log('⏭️ Skipping local update');
             isLocalUpdate.current = false;
             return;
           }
 
+          console.log('🔄 Reloading items due to remote change');
           // Reload all items when remote change detected
           loadItems();
         }
       )
       .subscribe((status) => {
+        console.log('📊 Realtime subscription status:', status);
         if (status === 'SUBSCRIBED') {
           setIsLive(true);
+          console.log('✅ Realtime connected for workspace:', workspaceId);
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
           setIsLive(false);
+          console.log('❌ Realtime disconnected');
         }
       });
 
     return () => {
+      console.log('🔌 Unsubscribing from realtime channel');
       channel.unsubscribe();
       setIsLive(false);
     };
@@ -234,6 +258,7 @@ export function useWorkspaceItems(workspaceId: string | null) {
     if (!workspaceId || !user) return;
 
     try {
+      console.log('💾 Saving all items to workspace:', workspaceId);
       // Mark as local update to prevent duplicate UI updates
       isLocalUpdate.current = true;
 
@@ -311,6 +336,8 @@ export function useWorkspaceItems(workspaceId: string | null) {
 
         if (error) {
           console.error('Error saving all items:', error);
+        } else {
+          console.log('✅ Saved', itemsToInsert.length, 'items to workspace');
         }
       }
     } catch (error) {
