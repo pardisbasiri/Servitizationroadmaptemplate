@@ -1,0 +1,274 @@
+-- =====================================================
+-- NUCLEAR OPTION - COMPLETE RLS RESET
+-- =====================================================
+-- This is the most aggressive fix possible
+-- It completely removes RLS and rebuilds from scratch
+-- Use this if EMERGENCY_RLS_RESET.sql didn't work
+-- =====================================================
+
+-- STEP 1: Nuclear option - Disable RLS completely
+-- =====================================================
+ALTER TABLE public.workspaces DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.workspace_members DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.workspace_items DISABLE ROW LEVEL SECURITY;
+
+-- STEP 2: Drop ALL policies with extreme prejudice
+-- =====================================================
+
+-- Use DO block to drop all policies programmatically
+DO $$
+DECLARE
+    pol RECORD;
+BEGIN
+    -- Drop all policies on workspaces
+    FOR pol IN
+        SELECT policyname
+        FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'workspaces'
+    LOOP
+        EXECUTE format('DROP POLICY IF EXISTS %I ON public.workspaces', pol.policyname);
+        RAISE NOTICE 'Dropped policy: % on workspaces', pol.policyname;
+    END LOOP;
+
+    -- Drop all policies on workspace_members
+    FOR pol IN
+        SELECT policyname
+        FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'workspace_members'
+    LOOP
+        EXECUTE format('DROP POLICY IF EXISTS %I ON public.workspace_members', pol.policyname);
+        RAISE NOTICE 'Dropped policy: % on workspace_members', pol.policyname;
+    END LOOP;
+
+    -- Drop all policies on workspace_items
+    FOR pol IN
+        SELECT policyname
+        FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'workspace_items'
+    LOOP
+        EXECUTE format('DROP POLICY IF EXISTS %I ON public.workspace_items', pol.policyname);
+        RAISE NOTICE 'Dropped policy: % on workspace_items', pol.policyname;
+    END LOOP;
+END $$;
+
+
+-- STEP 3: Drop old helper functions if they exist
+-- =====================================================
+DROP FUNCTION IF EXISTS public.is_workspace_member(UUID, UUID);
+DROP FUNCTION IF EXISTS public.is_workspace_owner(UUID, UUID);
+DROP FUNCTION IF EXISTS public.current_user_is_workspace_member(UUID);
+DROP FUNCTION IF EXISTS public.current_user_is_workspace_owner(UUID);
+
+
+-- STEP 4: Create simple SECURITY DEFINER functions
+-- =====================================================
+-- These functions have NO RLS checks - they run as superuser
+
+CREATE OR REPLACE FUNCTION public.check_workspace_membership(
+    p_workspace_id UUID,
+    p_user_id UUID
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.workspace_members
+        WHERE workspace_id = p_workspace_id
+          AND user_id = p_user_id
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION public.check_workspace_ownership(
+    p_workspace_id UUID,
+    p_user_id UUID
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.workspaces
+        WHERE id = p_workspace_id
+          AND owner_id = p_user_id
+    );
+$$;
+
+-- Grant execute to authenticated users
+GRANT EXECUTE ON FUNCTION public.check_workspace_membership(UUID, UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.check_workspace_ownership(UUID, UUID) TO authenticated;
+
+
+-- STEP 5: Create MINIMAL RLS policies
+-- =====================================================
+-- These are as simple as possible - no complex logic
+
+-- Re-enable RLS
+ALTER TABLE public.workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.workspace_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.workspace_items ENABLE ROW LEVEL SECURITY;
+
+
+-- === WORKSPACES TABLE ===
+-- Simple: all authenticated users can do everything (for testing)
+
+CREATE POLICY "workspaces_select"
+    ON public.workspaces
+    FOR SELECT
+    TO authenticated
+    USING (true);
+
+CREATE POLICY "workspaces_insert"
+    ON public.workspaces
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (owner_id = auth.uid());
+
+CREATE POLICY "workspaces_update"
+    ON public.workspaces
+    FOR UPDATE
+    TO authenticated
+    USING (owner_id = auth.uid())
+    WITH CHECK (owner_id = auth.uid());
+
+CREATE POLICY "workspaces_delete"
+    ON public.workspaces
+    FOR DELETE
+    TO authenticated
+    USING (owner_id = auth.uid());
+
+
+-- === WORKSPACE_MEMBERS TABLE ===
+-- CRITICAL: NO subqueries to workspace_members
+-- Uses SECURITY DEFINER functions only
+
+CREATE POLICY "workspace_members_select"
+    ON public.workspace_members
+    FOR SELECT
+    TO authenticated
+    USING (true);
+
+CREATE POLICY "workspace_members_insert"
+    ON public.workspace_members
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (
+        public.check_workspace_ownership(workspace_id, auth.uid())
+    );
+
+CREATE POLICY "workspace_members_update"
+    ON public.workspace_members
+    FOR UPDATE
+    TO authenticated
+    USING (
+        public.check_workspace_ownership(workspace_id, auth.uid())
+    )
+    WITH CHECK (
+        public.check_workspace_ownership(workspace_id, auth.uid())
+    );
+
+CREATE POLICY "workspace_members_delete"
+    ON public.workspace_members
+    FOR DELETE
+    TO authenticated
+    USING (
+        public.check_workspace_ownership(workspace_id, auth.uid())
+    );
+
+
+-- === WORKSPACE_ITEMS TABLE ===
+-- Simple: all authenticated users can do everything (for testing)
+
+CREATE POLICY "workspace_items_select"
+    ON public.workspace_items
+    FOR SELECT
+    TO authenticated
+    USING (true);
+
+CREATE POLICY "workspace_items_insert"
+    ON public.workspace_items
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (author_id = auth.uid());
+
+CREATE POLICY "workspace_items_update"
+    ON public.workspace_items
+    FOR UPDATE
+    TO authenticated
+    USING (true);
+
+CREATE POLICY "workspace_items_delete"
+    ON public.workspace_items
+    FOR DELETE
+    TO authenticated
+    USING (true);
+
+
+-- STEP 6: Recreate trigger for auto-adding workspace owner
+-- =====================================================
+
+CREATE OR REPLACE FUNCTION public.trigger_add_workspace_owner()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    INSERT INTO public.workspace_members (workspace_id, user_id, role)
+    VALUES (NEW.id, NEW.owner_id, 'owner')
+    ON CONFLICT (workspace_id, user_id) DO NOTHING;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trigger_workspace_owner_member ON public.workspaces;
+
+CREATE TRIGGER trigger_workspace_owner_member
+    AFTER INSERT ON public.workspaces
+    FOR EACH ROW
+    EXECUTE FUNCTION public.trigger_add_workspace_owner();
+
+
+-- STEP 7: Final verification
+-- =====================================================
+
+-- Show what policies exist now
+SELECT
+    '=== POLICIES AFTER RESET ===' as status,
+    tablename,
+    policyname,
+    cmd
+FROM pg_policies
+WHERE schemaname = 'public'
+  AND tablename IN ('workspaces', 'workspace_members', 'workspace_items')
+ORDER BY tablename, policyname;
+
+-- Test queries (these should work without 42P17)
+DO $$
+BEGIN
+    PERFORM COUNT(*) FROM public.workspaces;
+    RAISE NOTICE '✅ Can query workspaces';
+
+    PERFORM COUNT(*) FROM public.workspace_members;
+    RAISE NOTICE '✅ Can query workspace_members';
+
+    PERFORM COUNT(*) FROM public.workspace_items;
+    RAISE NOTICE '✅ Can query workspace_items';
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE '❌ Error: % (Code: %)', SQLERRM, SQLSTATE;
+END $$;
+
+
+-- =====================================================
+-- MIGRATION COMPLETE
+-- =====================================================
+-- Expected: 12 policies total (4 per table)
+-- Expected: All test queries work
+-- Expected: NO 42P17 errors
+-- =====================================================

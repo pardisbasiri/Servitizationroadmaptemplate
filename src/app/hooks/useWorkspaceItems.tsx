@@ -40,7 +40,16 @@ export function useWorkspaceItems(workspaceId: string | null) {
   });
   const [loading, setLoading] = useState(true);
   const [isLive, setIsLive] = useState(false);
-  const isLocalUpdate = useRef(false);
+  const [connectionStatus, setConnectionStatus] = useState<string>('disconnected');
+  const [debugInfo, setDebugInfo] = useState({
+    channelName: null as string | null,
+    channelState: 'unknown',
+    lastError: null as any,
+    lastEventTime: null as number | null,
+    isSubscribedToWorkspaceItems: false,
+    realtimeEnabled: true,
+  });
+  const channelRef = useRef<any>(null);
 
   // Load all items from workspace
   const loadItems = useCallback(async () => {
@@ -57,7 +66,8 @@ export function useWorkspaceItems(workspaceId: string | null) {
         .eq('workspace_id', workspaceId);
 
       if (error) {
-        console.error('Error loading workspace items:', error);
+        console.error('❌ Error loading workspace items:', error);
+        setDebugInfo(prev => ({ ...prev, lastError: error }));
         setLoading(false);
         return;
       }
@@ -99,7 +109,8 @@ export function useWorkspaceItems(workspaceId: string | null) {
       setData({ themes, capabilities, actions, dependencies, timeframeDefinitions });
       setLoading(false);
     } catch (error) {
-      console.error('Error in loadItems:', error);
+      console.error('❌ Error in loadItems:', error);
+      setDebugInfo(prev => ({ ...prev, lastError: error }));
       setLoading(false);
     }
   }, [workspaceId, user]);
@@ -110,17 +121,63 @@ export function useWorkspaceItems(workspaceId: string | null) {
 
   // Set up realtime subscription
   useEffect(() => {
+    console.log('🔄 Realtime effect triggered', { workspaceId, userId: user?.id });
+
     if (!workspaceId || !user) {
-      console.log('⚠️ Realtime: No workspace or user');
+      console.log('⚠️ Realtime: No workspace or user', { workspaceId, userId: user?.id });
       setIsLive(false);
+      setConnectionStatus('no_workspace_or_user');
+      setDebugInfo(prev => ({
+        ...prev,
+        channelName: null,
+        channelState: 'not_initialized',
+        isSubscribedToWorkspaceItems: false,
+      }));
       return;
     }
 
-    console.log('🔌 Setting up realtime subscription for workspace:', workspaceId);
+    console.log('🔌 Setting up realtime subscription', {
+      workspaceId,
+      userId: user.id,
+      userEmail: user.email,
+    });
 
-    const channel = supabase
-      .channel(`workspace:${workspaceId}`)
-      .on(
+    setConnectionStatus('connecting');
+
+    // Clean up any existing channel
+    if (channelRef.current) {
+      console.log('🧹 Cleaning up existing channel');
+      try {
+        channelRef.current.unsubscribe();
+      } catch (e) {
+        console.error('Error unsubscribing:', e);
+      }
+      channelRef.current = null;
+    }
+
+    const channelName = `workspace-${workspaceId}`;
+    console.log('📺 Creating channel:', channelName);
+
+    setDebugInfo(prev => ({
+      ...prev,
+      channelName,
+      channelState: 'creating',
+      isSubscribedToWorkspaceItems: false,
+    }));
+
+    try {
+      const channel = supabase.channel(channelName, {
+        config: {
+          broadcast: { self: false },
+          presence: { key: user.id },
+        },
+      });
+
+      channelRef.current = channel;
+
+      console.log('➕ Adding postgres_changes listener for workspace_items');
+
+      channel.on(
         'postgres_changes',
         {
           event: '*',
@@ -132,37 +189,113 @@ export function useWorkspaceItems(workspaceId: string | null) {
           console.log('📡 Realtime event received:', {
             event: payload.eventType,
             table: payload.table,
-            new: payload.new,
-            old: payload.old,
+            workspace_id: payload.new?.workspace_id || payload.old?.workspace_id,
+            author_id: payload.new?.author_id || payload.old?.author_id,
+            current_user: user.id,
+            timestamp: new Date().toISOString(),
           });
 
-          // Ignore changes made by current user to prevent duplicates
-          if (isLocalUpdate.current) {
-            console.log('⏭️ Skipping local update');
-            isLocalUpdate.current = false;
+          setDebugInfo(prev => ({ ...prev, lastEventTime: Date.now() }));
+
+          // Check if this was from the current user
+          const isFromCurrentUser =
+            payload.new?.author_id === user.id ||
+            payload.old?.author_id === user.id;
+
+          if (isFromCurrentUser) {
+            console.log('⏭️ Skipping - change from current user');
             return;
           }
 
-          console.log('🔄 Reloading items due to remote change');
-          // Reload all items when remote change detected
+          console.log('🔄 Reloading items due to remote change from another user');
           loadItems();
         }
-      )
-      .subscribe((status) => {
-        console.log('📊 Realtime subscription status:', status);
+      );
+
+      setDebugInfo(prev => ({ ...prev, isSubscribedToWorkspaceItems: true }));
+
+      console.log('🔗 Subscribing to channel...');
+
+      channel.subscribe(async (status, err) => {
+        console.log('📊 === REALTIME SUBSCRIPTION CALLBACK ===');
+        console.log('📊 Status:', status);
+        console.log('📊 Error:', err);
+        console.log('📊 Channel state:', channel.state);
+        console.log('📊 Timestamp:', new Date().toISOString());
+        console.log('📊 ======================================');
+
+        setConnectionStatus(status);
+        setDebugInfo(prev => ({ ...prev, channelState: channel.state }));
+
+        if (err) {
+          console.error('❌ Subscription error:', err);
+          setDebugInfo(prev => ({ ...prev, lastError: err }));
+        }
+
         if (status === 'SUBSCRIBED') {
           setIsLive(true);
-          console.log('✅ Realtime connected for workspace:', workspaceId);
-        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+          console.log('✅ ✅ ✅ Realtime SUBSCRIBED ✅ ✅ ✅', {
+            channel: channelName,
+            workspaceId,
+            userId: user.id,
+            channelState: channel.state,
+          });
+        } else if (status === 'CHANNEL_ERROR') {
           setIsLive(false);
-          console.log('❌ Realtime disconnected');
+          console.error('❌ ❌ ❌ Realtime CHANNEL_ERROR ❌ ❌ ❌', err);
+          setDebugInfo(prev => ({ ...prev, lastError: err || 'CHANNEL_ERROR' }));
+        } else if (status === 'TIMED_OUT') {
+          setIsLive(false);
+          console.error('❌ ❌ ❌ Realtime TIMED_OUT ❌ ❌ ❌');
+          setDebugInfo(prev => ({ ...prev, lastError: 'TIMED_OUT' }));
+        } else if (status === 'CLOSED') {
+          setIsLive(false);
+          console.log('🔴 Realtime CLOSED');
+        } else {
+          console.log('📊 Realtime intermediate status:', status);
         }
       });
 
+      // Check connection state after delays
+      setTimeout(() => {
+        console.log('🔍 [2s check] Channel state:', {
+          state: channel.state,
+          isLive,
+          status: connectionStatus,
+        });
+      }, 2000);
+
+      setTimeout(() => {
+        console.log('🔍 [5s check] Channel state:', {
+          state: channel.state,
+          isLive,
+          status: connectionStatus,
+        });
+      }, 5000);
+
+    } catch (error) {
+      console.error('❌ Error setting up realtime:', error);
+      setDebugInfo(prev => ({ ...prev, lastError: error }));
+      setConnectionStatus('setup_error');
+    }
+
     return () => {
-      console.log('🔌 Unsubscribing from realtime channel');
-      channel.unsubscribe();
+      console.log('🔌 Cleaning up realtime subscription');
+      if (channelRef.current) {
+        try {
+          channelRef.current.unsubscribe();
+        } catch (e) {
+          console.error('Error during cleanup:', e);
+        }
+        channelRef.current = null;
+      }
       setIsLive(false);
+      setConnectionStatus('disconnected');
+      setDebugInfo(prev => ({
+        ...prev,
+        channelState: 'closed',
+        isSubscribedToWorkspaceItems: false,
+      }));
     };
   }, [workspaceId, user, loadItems]);
 
@@ -174,7 +307,6 @@ export function useWorkspaceItems(workspaceId: string | null) {
       const content = { type, data: itemData };
 
       if (itemId) {
-        // Update existing item - get all items and filter client-side
         const { data: items } = await supabase
           .from('workspace_items')
           .select('*')
@@ -198,7 +330,6 @@ export function useWorkspaceItems(workspaceId: string | null) {
           }
         }
       } else {
-        // Create new item
         const { error } = await supabase
           .from('workspace_items')
           .insert({
@@ -258,9 +389,12 @@ export function useWorkspaceItems(workspaceId: string | null) {
     if (!workspaceId || !user) return;
 
     try {
-      console.log('💾 Saving all items to workspace:', workspaceId);
-      // Mark as local update to prevent duplicate UI updates
-      isLocalUpdate.current = true;
+      console.log('💾 Saving all items to workspace:', workspaceId, {
+        themes: newData.themes?.length,
+        capabilities: newData.capabilities?.length,
+        actions: newData.actions?.length,
+        dependencies: newData.dependencies?.length,
+      });
 
       // Delete all existing items
       await supabase
@@ -353,5 +487,7 @@ export function useWorkspaceItems(workspaceId: string | null) {
     saveAllItems,
     setData,
     isLive,
+    connectionStatus,
+    debugInfo,
   };
 }

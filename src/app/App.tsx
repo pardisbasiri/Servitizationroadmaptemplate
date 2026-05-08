@@ -13,6 +13,8 @@ import { AuthModal } from './components/AuthModal';
 import { useWorkspace } from './hooks/useWorkspace';
 import { useWorkspaceItems } from './hooks/useWorkspaceItems';
 import { LiveIndicator } from './components/LiveIndicator';
+import { RealtimeDebugPanel } from './components/RealtimeDebugPanel';
+import { projectId } from '../../utils/supabase/info';
 
 const TEAMS = ['Mechanics', 'Software', 'R&D (Digital Service Design)', 'Digital Services', 'Sales Engineering', 'Sales'];
 
@@ -25,13 +27,25 @@ const TIMEFRAMES = [
 function RoadmapApp() {
   const { user, signOut } = useAuth();
   const { workspace, loading: workspaceLoading } = useWorkspace();
-  const { data, loading: itemsLoading, saveItem, deleteItem, saveAllItems, setData, isLive } = useWorkspaceItems(workspace?.id || null);
+  const { data, loading: itemsLoading, saveItem, deleteItem, saveAllItems, setData, isLive, connectionStatus, debugInfo } = useWorkspaceItems(workspace?.id || null);
 
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [viewMode, setViewMode] = useState<'multilayer' | 'timeline' | 'structured'>('multilayer');
   const [timeBlockWeeks, setTimeBlockWeeks] = useState(1);
   const [newThemeIds, setNewThemeIds] = useState<Set<string>>(new Set());
   const [newCapabilityIds, setNewCapabilityIds] = useState<Set<string>>(new Set());
+
+  // Capture console errors for debugging
+  useEffect(() => {
+    const originalError = console.error;
+    console.error = (...args: any[]) => {
+      originalError.apply(console, args);
+      // Errors are already being logged, just making sure they're visible
+    };
+    return () => {
+      console.error = originalError;
+    };
+  }, []);
 
   // Extract data from workspace
   const themes = data.themes;
@@ -421,7 +435,12 @@ function RoadmapApp() {
                 </button>
 
                 <div className="ml-auto flex items-center gap-3">
-                  <LiveIndicator isLive={isLive} />
+                  <LiveIndicator
+                    isLive={isLive}
+                    workspaceId={workspace?.id}
+                    connectionStatus={connectionStatus}
+                    userId={user?.id}
+                  />
 
                   {user ? (
                     <div className="flex items-center gap-3 rounded-xl bg-white px-4 py-2.5 border border-slate-200 shadow-sm">
@@ -740,6 +759,20 @@ function RoadmapApp() {
       </div>
 
       {showAuthModal && <AuthModal onClose={() => setShowAuthModal(false)} />}
+
+      {/* Temporary Debug Panel */}
+      <RealtimeDebugPanel
+        supabaseUrl={`https://${projectId}.supabase.co`}
+        userId={user?.id || null}
+        workspaceId={workspace?.id || null}
+        channelName={debugInfo.channelName}
+        subscriptionStatus={connectionStatus}
+        lastError={debugInfo.lastError}
+        lastEventTime={debugInfo.lastEventTime}
+        isSubscribedToWorkspaceItems={debugInfo.isSubscribedToWorkspaceItems}
+        channelState={debugInfo.channelState}
+        realtimeEnabled={debugInfo.realtimeEnabled}
+      />
     </DndProvider>
   );
 }
