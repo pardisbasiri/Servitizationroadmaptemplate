@@ -11,15 +11,25 @@ interface ThemeCardProps {
   theme: ThemeCardData;
   onUpdate: (theme: ThemeCardData) => void;
   onDelete: (id: string) => void;
+  initialEditing?: boolean;
 }
 
-export function ThemeCard({ theme, onUpdate, onDelete }: ThemeCardProps) {
-  const [isEditing, setIsEditing] = useState(false);
+export function ThemeCard({ theme, onUpdate, onDelete, initialEditing = false }: ThemeCardProps) {
+  const [isEditing, setIsEditing] = useState(initialEditing);
   const [editData, setEditData] = useState(theme);
 
   const handleSave = () => {
     onUpdate(editData);
     setIsEditing(false);
+  };
+
+  const handleCancel = () => {
+    if (initialEditing) {
+      // If this was a new item in edit mode, delete it
+      onDelete(theme.id);
+    } else {
+      setIsEditing(false);
+    }
   };
 
   return (
@@ -32,6 +42,8 @@ export function ThemeCard({ theme, onUpdate, onDelete }: ThemeCardProps) {
             onChange={(e) => setEditData({ ...editData, title: e.target.value })}
             className="w-full px-2 py-1 border border-slate-500 bg-slate-600 text-white rounded"
             style={{ fontFamily: 'var(--font-sans)' }}
+            placeholder="Theme title"
+            autoFocus
           />
           <textarea
             value={editData.description}
@@ -39,6 +51,7 @@ export function ThemeCard({ theme, onUpdate, onDelete }: ThemeCardProps) {
             className="w-full px-2 py-1 border border-slate-500 bg-slate-600 text-white rounded resize-none"
             rows={2}
             style={{ fontFamily: 'var(--font-sans)' }}
+            placeholder="Describe the problem area"
           />
           <div className="flex gap-1">
             <button
@@ -48,7 +61,7 @@ export function ThemeCard({ theme, onUpdate, onDelete }: ThemeCardProps) {
               Save
             </button>
             <button
-              onClick={() => setIsEditing(false)}
+              onClick={handleCancel}
               className="px-2 py-1 bg-slate-600 text-white rounded text-xs hover:bg-slate-500"
             >
               Cancel

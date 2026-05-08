@@ -14,10 +14,11 @@ interface CapabilityCardProps {
   capability: CapabilityCardData;
   onUpdate: (capability: CapabilityCardData) => void;
   onDelete: (id: string) => void;
+  initialEditing?: boolean;
 }
 
-export function CapabilityCard({ capability, onUpdate, onDelete }: CapabilityCardProps) {
-  const [isEditing, setIsEditing] = useState(false);
+export function CapabilityCard({ capability, onUpdate, onDelete, initialEditing = false }: CapabilityCardProps) {
+  const [isEditing, setIsEditing] = useState(initialEditing);
   const [editData, setEditData] = useState(capability);
 
   const [{ isOver }, drop] = useDrop(() => ({
@@ -34,6 +35,15 @@ export function CapabilityCard({ capability, onUpdate, onDelete }: CapabilityCar
   const handleSave = () => {
     onUpdate(editData);
     setIsEditing(false);
+  };
+
+  const handleCancel = () => {
+    if (initialEditing) {
+      // If this was a new item in edit mode, delete it
+      onDelete(capability.id);
+    } else {
+      setIsEditing(false);
+    }
   };
 
   const getEphemeralityColor = (value: string) => {
@@ -64,6 +74,8 @@ export function CapabilityCard({ capability, onUpdate, onDelete }: CapabilityCar
             onChange={(e) => setEditData({ ...editData, title: e.target.value })}
             className="w-full px-2 py-1 border border-gray-300 rounded"
             style={{ fontFamily: 'var(--font-sans)' }}
+            placeholder="Capability title"
+            autoFocus
           />
           <select
             value={editData.ephemerality}
@@ -83,7 +95,7 @@ export function CapabilityCard({ capability, onUpdate, onDelete }: CapabilityCar
               Save
             </button>
             <button
-              onClick={() => setIsEditing(false)}
+              onClick={handleCancel}
               className="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300"
             >
               Cancel
